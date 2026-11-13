@@ -208,6 +208,7 @@ The script creates its own listing and deletes it, so existing data is not chang
 
 ## What I learned
 
+- **How listing IDs work.** The function generates a unique `listingId` when a listing is created, and the create response returns it. Get, update, and delete all need that ID. It goes in the URL path (`/listings/<listingId>`) or, in a Lambda test event, in `pathParameters`. When an ID does not match a stored listing, the function returns `404` with `Listing not found`, which means the route worked and the lookup found nothing.
 - **Test events versus functions.** A Lambda test event is a saved sample input for the function. It does not create anything in AWS.
 - **Two kinds of "deploy".** Editing Lambda code takes effect only after choosing **Deploy** in the Lambda console. API Gateway with automatic deployment republishes route changes on its own.
 - **Path parameter names must match.** The route `/listings/{id}` and the code `event.pathParameters.id` must use the same name.
