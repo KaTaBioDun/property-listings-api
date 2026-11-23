@@ -3,14 +3,18 @@
 # Runs one full cycle (create, list, get, update, delete) and checks each HTTP status.
 # It creates its own listing and deletes it, so your existing listings are not touched.
 #
-# Usage: bash smoke-test.sh https://YOUR-API-ID.execute-api.eu-west-2.amazonaws.com
+# Usage: bash smoke-test.sh https://YOUR-API-ID.execute-api.eu-west-2.amazonaws.com [ID_TOKEN]
+#
+# Pass a Cognito ID token as the second argument once the API requires sign-in.
+# With a token, the script also checks that a request without one is rejected (401).
 
 set -u
 if [ $# -lt 1 ]; then
-  echo "Usage: bash smoke-test.sh https://YOUR-API-ID.execute-api.eu-west-2.amazonaws.com"
+  echo "Usage: bash smoke-test.sh https://YOUR-API-ID.execute-api.eu-west-2.amazonaws.com [ID_TOKEN]"
   exit 2
 fi
 API_URL="${1%/}"
+TOKEN="${2:-}"
 pass=0
 fail=0
 
@@ -26,11 +30,13 @@ check() {  # check <name> <expected status> <actual status>
 
 request() {  # request <method> <path> [json body]; sets STATUS and BODY
   local method=$1 path=$2 data=${3:-} out
+  local auth=()
+  [ -n "$TOKEN" ] && auth=(-H "Authorization: Bearer $TOKEN")
   if [ -n "$data" ]; then
     out=$(curl -s -w $'\n%{http_code}' -X "$method" "$API_URL$path" \
-      -H "Content-Type: application/json" -d "$data")
+      ${auth[@]+"${auth[@]}"} -H "Content-Type: application/json" -d "$data")
   else
-    out=$(curl -s -w $'\n%{http_code}' -X "$method" "$API_URL$path")
+    out=$(curl -s -w $'\n%{http_code}' -X "$method" "$API_URL$path" ${auth[@]+"${auth[@]}"})
   fi
   STATUS=${out##*$'\n'}
   BODY=${out%$'\n'*}
@@ -42,7 +48,7 @@ echo
 # 1. Create
 request POST /listings '{"title":"Smoke test listing","location":"Test City","price":1000,"type":"land"}'
 check "Create listing" 201 "$STATUS"
-ID=$(echo "$BODY" | grep -o '"listingId":"[^"]*"' | cut -d'"' -f4)
+ID=$(echo "$BODY" | grep -o '"listingId" *: *"[^"]*"' | cut -d'"' -f4)
 if [ -z "$ID" ]; then
   echo "FAIL  No listingId in the create response. Stopping."
   exit 1
@@ -57,6 +63,12 @@ check "Reject invalid type" 400 "$STATUS"
 request GET /listings
 check "List listings" 200 "$STATUS"
 
+# 3b. Without a token the API must refuse (only checked when a token was given)
+if [ -n "$TOKEN" ]; then
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$API_URL/listings")
+  check "Reject request without a token" 401 "$code"
+fi
+
 # 4. Get one
 request GET "/listings/$ID"
 check "Get listing" 200 "$STATUS"
@@ -64,7 +76,7 @@ check "Get listing" 200 "$STATUS"
 # 5. Update
 request PUT "/listings/$ID" '{"status":"sold"}'
 check "Update listing" 200 "$STATUS"
-if echo "$BODY" | grep -q '"status":"sold"'; then
+if echo "$BODY" | grep -Eq '"status" *: *"sold"'; then
   echo "PASS  Status is now sold"
   pass=$((pass + 1))
 else
