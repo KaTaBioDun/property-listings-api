@@ -1,223 +1,156 @@
-# Property listings API
+# Procuratio
 
-A serverless REST API for managing property listings, built on AWS with API Gateway, Lambda, and DynamoDB. It supports create, read, update, and delete (CRUD) operations on listings for land, buildings, and rentals.
+A property listings manager for land, buildings, and rentals. It is a React and Tailwind CSS single-page app, hosted on AWS and backed by a serverless API. Access is limited to users that an administrator creates in Amazon Cognito.
 
-## Overview
+**Live site:** https://d3ph8kghrwzfoa.cloudfront.net (sign-in required, no public sign-up)
 
-| Item | Value |
-|---|---|
-| API type | Amazon API Gateway HTTP API |
-| Compute | One AWS Lambda function (`listings-api`), Node.js, ES modules |
-| Database | Amazon DynamoDB table `property-listings`, on-demand capacity |
-| Region | `eu-west-2` (London) |
-| Base URL | `https://<API-ID>.execute-api.eu-west-2.amazonaws.com` |
-| Authentication | None (see [Limitations](#limitations)) |
+The API this app calls is in [property-listings-api](https://github.com/KaTaBioDun/property-listings-api).
+
+## Features
+
+- Sign in and sign out with an email and password.
+- Create, edit, and delete listings, and mark a listing as sold or reopen it.
+- Search by title or location, filter by type and status, and sort by date or price.
+- A header summary that adapts to the data, for example "2 of 6 listings are available, worth ₦90M."
+- Form validation with inline errors, a delete confirmation, and success and error messages.
+- Loading, empty, and error states, and a session that refreshes quietly until the refresh token expires.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    C[Client] -- HTTPS --> A[API Gateway HTTP API]
-    A -- Lambda proxy integration --> L[Lambda: listings-api]
-    L -- AWS SDK v3 --> D[(DynamoDB: property-listings)]
+    B[Browser]
+    B -- "Loads the app" --> CF[CloudFront]
+    CF -- "Origin Access Control" --> S3[(Private S3 bucket)]
+    B -- "Signs in" --> CG[Cognito user pool]
+    B -- "API calls with ID token" --> AG[API Gateway]
+    AG --> L[Lambda] --> D[(DynamoDB)]
 ```
 
-**Request flow**
+| Layer | Technology |
+|---|---|
+| UI | React, Vite, Tailwind CSS |
+| Hosting | Private Amazon S3 bucket behind Amazon CloudFront (HTTPS) |
+| Authentication | Amazon Cognito user pool |
+| API | API Gateway HTTP API with a JWT authorizer, Lambda, DynamoDB |
+| Deployment | GitHub Actions with OpenID Connect (no stored AWS keys) |
 
-1. The client sends an HTTPS request to the API Gateway base URL.
-2. API Gateway matches the method and path to one of five routes and invokes the Lambda function with an event that includes `routeKey`, `pathParameters`, and `body`.
-3. The function reads `routeKey`, validates the input, and runs one DynamoDB operation.
-4. The function returns a JSON response with a status code. API Gateway passes it back to the client.
+## Sign-in flow
 
-## Data model
+1. The user submits an email and password. The app calls Cognito's `InitiateAuth` operation with the `USER_PASSWORD_AUTH` flow.
+2. Cognito returns an ID token, a refresh token, and an expiry time. The app stores them in `sessionStorage`, so closing the tab signs the user out.
+3. Every API request carries the header `Authorization: Bearer <ID token>`.
+4. Before each request, the app checks the expiry. When less than 60 seconds remain, it requests a new ID token with the refresh token.
+5. If a refresh fails, or the API returns `401`, the app clears the session and shows the sign-in screen.
 
-Table `property-listings`, partition key `listingId` (String). No sort key.
+The logic is in `src/auth.js`, and the API client in `src/api.js` attaches the token.
 
-| Attribute | Type | Set by | Rules |
-|---|---|---|---|
-| `listingId` | String | Server | UUID generated on create |
-| `title` | String | Client | Required, non-empty |
-| `location` | String | Client | Required, non-empty |
-| `price` | Number | Client | Required, 0 or more |
-| `type` | String | Client | Required. One of `land`, `building`, `rental` |
-| `status` | String | Client | Optional on create (default `available`). One of `available`, `sold` |
-| `createdAt` | String | Server | ISO 8601 timestamp, set on create |
-| `updatedAt` | String | Server | ISO 8601 timestamp, set on update |
+## Project structure
 
-## API reference
+```
+property-listings-web/
+├── .github/workflows/deploy.yml   # Build and deploy on every push to main
+├── index.html
+├── vite.config.js                 # Fixes the dev server on port 5173 (the CORS origin)
+├── .env.example                   # Template for local settings
+└── src/
+    ├── main.jsx
+    ├── App.jsx                    # State, API calls, page layout
+    ├── api.js                     # API client that adds the token
+    ├── auth.js                    # Cognito sign-in, token storage, refresh
+    ├── index.css                  # Theme tokens and fonts
+    ├── lib/
+    │   └── format.js              # Constants, currency and date formats, shared styles
+    └── components/
+        ├── Login.jsx
+        ├── ListingCard.jsx
+        ├── ListingForm.jsx
+        ├── Modal.jsx
+        ├── Plan.jsx               # Illustration for each property type
+        ├── Segmented.jsx          # Filter chips
+        └── Select.jsx             # Dropdown with a custom arrow
+```
 
-All request and response bodies use JSON. Send `Content-Type: application/json` with a body.
+## Configuration
 
-| Method | Path | Description |
+Vite reads these variables at build time and embeds them in the app. They are identifiers, not secrets.
+
+| Variable | Required | Description |
 |---|---|---|
-| `POST` | `/listings` | Create a listing |
-| `GET` | `/listings` | List all listings, newest first |
-| `GET` | `/listings/{id}` | Get one listing |
-| `PUT` | `/listings/{id}` | Update one or more fields of a listing |
-| `DELETE` | `/listings/{id}` | Delete a listing |
+| `VITE_API_URL` | Yes | API Gateway invoke URL, with no trailing slash |
+| `VITE_COGNITO_CLIENT_ID` | Yes | ID of the Cognito app client |
+| `VITE_COGNITO_REGION` | No | Region of the user pool. Defaults to `eu-west-2` |
 
-### Create a listing
+## Run locally
 
-```bash
-curl -X POST "$API_URL/listings" \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Corner plot, 600 sqm","location":"Lekki, Lagos","price":45000000,"type":"land"}'
-```
-
-Response `201 Created`:
-
-```json
-{
-  "listingId": "<generated UUID>",
-  "title": "Corner plot, 600 sqm",
-  "location": "Lekki, Lagos",
-  "price": 45000000,
-  "type": "land",
-  "status": "available",
-  "createdAt": "<ISO 8601 timestamp>"
-}
-```
-
-### List all listings
+Prerequisites: Node.js and a deployed copy of the API.
 
 ```bash
-curl "$API_URL/listings"
+npm install
+cp .env.example .env     # then fill in your values
+npm run dev
 ```
 
-Response `200 OK`: a JSON array of listings, sorted by `createdAt` with the newest first. The function reads the full table with a paginated `Scan`.
+Open `http://localhost:5173`. The dev server is fixed to port 5173 with `strictPort`, because the API's CORS configuration allows that exact origin. Restart the server after changing `.env`.
 
-### Get a listing
+## Build and deploy
 
-```bash
-curl "$API_URL/listings/<listingId>"
-```
+On every push to `main`, `.github/workflows/deploy.yml` runs these steps:
 
-Response `200 OK`: the listing object. Response `404 Not Found` if no listing has that ID.
-
-### Update a listing
-
-```bash
-curl -X PUT "$API_URL/listings/<listingId>" \
-  -H "Content-Type: application/json" \
-  -d '{"status":"sold"}'
-```
-
-The body must contain at least one of `title`, `location`, `price`, `type`, `status`. Fields that are not sent keep their current values. Other fields in the body are ignored. The function sets `updatedAt` and returns the full updated listing with `200 OK`. If no listing has that ID, it returns `404 Not Found` and does not create one.
-
-### Delete a listing
-
-```bash
-curl -X DELETE "$API_URL/listings/<listingId>"
-```
-
-Response `200 OK` with `{"message":"Listing deleted"}`. Deleting an ID that does not exist returns `404 Not Found`.
-
-### Errors
-
-Errors return a JSON body with a `message` field.
-
-| Status | Cause |
+| Step | What it does |
 |---|---|
-| `400 Bad Request` | The body is not valid JSON, a required field is missing, a value fails validation, or an update has no valid fields |
-| `404 Not Found` | The listing does not exist, or the route is not recognized by the function |
-| `500 Internal Server Error` | An unexpected error in the function. Details are written to CloudWatch Logs |
+| Install | `npm ci` |
+| Build | `npm run build`, using the repository variables `VITE_API_URL` and `VITE_COGNITO_CLIENT_ID`. The step fails if either is missing |
+| Authenticate | Exchanges a GitHub-issued OIDC token for temporary credentials on the IAM role `github-actions-listings-web-deploy` |
+| Upload | `aws s3 sync dist` to the bucket, with `--delete` so files that are no longer in the build are removed |
+| Invalidate | Creates a CloudFront invalidation for `/*` |
 
-Requests to a method and path that are not one of the five routes receive `{"message":"Not Found"}` from API Gateway before they reach the function.
+The IAM role's trust policy accepts tokens only from this repository's `main` branch. Its permissions policy allows `s3:ListBucket`, `s3:PutObject`, and `s3:DeleteObject` on one bucket, and `cloudfront:CreateInvalidation` on one distribution.
 
-## Permissions
+To set up hosting from scratch:
 
-The Lambda execution role has the AWS-managed basic logging permissions plus this inline policy, which allows five actions on this one table:
+1. Create a private S3 bucket with Block Public Access on.
+2. Create a CloudFront distribution with the bucket as origin, Origin Access Control, and `index.html` as the default root object.
+3. Create the IAM policy and role described above.
+4. Add the repository variables `VITE_API_URL` and `VITE_COGNITO_CLIENT_ID` (Settings, Secrets and variables, Actions, Variables).
+5. Add the CloudFront domain to the API's allowed CORS origins.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "ListingsTableAccess",
-      "Effect": "Allow",
-      "Action": [
-        "dynamodb:PutItem",
-        "dynamodb:GetItem",
-        "dynamodb:Scan",
-        "dynamodb:UpdateItem",
-        "dynamodb:DeleteItem"
-      ],
-      "Resource": "arn:aws:dynamodb:eu-west-2:<ACCOUNT-ID>:table/property-listings"
-    }
-  ]
-}
-```
+## Design
 
-## Repository structure
-
-```
-property-listings-api/
-├── index.mjs        # Lambda handler: routing, validation, DynamoDB operations
-├── smoke-test.sh    # End-to-end test against a deployed API
-└── README.md        # This file
-```
-
-## Deploy
-
-Resources were created in the AWS console, in this order.
-
-1. **DynamoDB.** Create the table `property-listings` with partition key `listingId` (String) and **On-demand** capacity.
-2. **Lambda.** Create a Node.js function named `listings-api`. Paste the contents of `index.mjs` and choose **Deploy**.
-3. **IAM.** Open the function's execution role and add the inline policy from [Permissions](#permissions).
-4. **API Gateway.** Create an **HTTP API** named `property-listings-api` with a Lambda integration for `listings-api`. Add these routes, all pointing to the same integration: `POST /listings`, `GET /listings`, `GET /listings/{id}`, `PUT /listings/{id}`, `DELETE /listings/{id}`. Use the stage `$default` with automatic deployment enabled.
-5. Copy the **Invoke URL** from the stage details.
-
-The path parameter must be named `id`, because the function reads `event.pathParameters.id`.
-
-## Test
-
-`smoke-test.sh` runs one full cycle against a deployed API and prints `PASS` or `FAIL` for each check:
-
-```bash
-bash smoke-test.sh https://<API-ID>.execute-api.eu-west-2.amazonaws.com
-```
-
-| Check | Expected status |
-|---|---|
-| Create listing | 201 |
-| Reject invalid `type` | 400 |
-| List listings | 200 |
-| Get listing | 200 |
-| Update listing | 200, and `status` is `sold` |
-| Delete listing | 200 |
-| Get deleted listing | 404 |
-| Delete again | 404 |
-
-The script creates its own listing and deletes it, so existing data is not changed. It exits with code 0 only if every check passes.
+- Light theme in deep green and white, with Sora for headings and Albert Sans for text.
+- A centered grid of cards. Each card has an illustration drawn for its type: a plot with trees for land, a tower for buildings, and a house for rentals.
+- Sold listings fade to grey and carry a dark "Sold" badge.
+- Dialogs use the native `<dialog>` element, form fields have labels, and focus is visible for keyboard use.
 
 ## Limitations
 
-- **No authentication.** Anyone with the base URL can create, change, and delete listings.
-- **No CORS configuration.** Browsers block calls from a web page on another origin until CORS is enabled on the API.
-- **Full-table scan for listing.** `GET /listings` reads every item. This is acceptable for a small table and does not scale to large ones. There is no filtering or pagination in the API.
-- **Console deployment.** Resources are not yet defined as infrastructure as code, and Lambda code is deployed by pasting it into the console.
-- **Cost.** At this project's request volume, Lambda and DynamoDB usage is small. API Gateway HTTP API charges per request and is not part of the free tier for accounts on the AWS Free plan. Check the Billing console and current AWS pricing.
+- **One level of access.** Every signed-in user can edit every listing. There are no roles.
+- **Tokens in `sessionStorage`.** They are readable by any script on the page. The app loads no third-party scripts, and the only external resource is Google Fonts.
+- **No second factor.** Sign-in uses a password only.
+- **Light theme only.** There is no dark mode.
+- **Default CloudFront domain.** The site has no custom domain.
+- **No automated tests.** Behavior was checked by hand and with a build and lint pass.
 
 ## Roadmap
 
-- [ ] Enable CORS on the API.
-- [ ] Add a React and Tailwind CSS frontend, hosted on S3 and CloudFront.
-- [ ] Add sign-up and sign-in with Amazon Cognito, and require a valid token on write routes.
-- [ ] Deploy the Lambda code with GitHub Actions.
-- [ ] Define the resources in Terraform or AWS CDK.
+- [ ] Add a custom domain with Route 53 and ACM.
+- [ ] Add multi-factor authentication in Cognito.
+- [ ] Add roles so only some users can edit.
+- [ ] Add tests for the sign-in logic and the listing form.
+- [ ] Define the S3 bucket, CloudFront distribution, and IAM role as code.
 
 ## What I learned
 
-- **How listing IDs work.** The function generates a unique `listingId` when a listing is created, and the create response returns it. Get, update, and delete all need that ID. It goes in the URL path (`/listings/<listingId>`) or, in a Lambda test event, in `pathParameters`. When an ID does not match a stored listing, the function returns `404` with `Listing not found`, which means the route worked and the lookup found nothing.
-- **Test events versus functions.** A Lambda test event is a saved sample input for the function. It does not create anything in AWS.
-- **Two kinds of "deploy".** Editing Lambda code takes effect only after choosing **Deploy** in the Lambda console. API Gateway with automatic deployment republishes route changes on its own.
-- **Path parameter names must match.** The route `/listings/{id}` and the code `event.pathParameters.id` must use the same name.
-- **A 404 can come from different layers.** API Gateway returns `{"message":"Not Found"}` for an undefined route, while the function returns `Listing not found` for a missing ID.
-- **Reserved words in DynamoDB.** The update expression uses `#name` placeholders because `location`, `status`, and `type` are DynamoDB reserved words.
+- **Environment variables are baked in at build time.** Vite reads `.env` only when the dev server starts, and a deployed build only has the values that GitHub Actions passes in, so the same values must exist as repository variables.
+- **Each origin must be allowed in CORS.** Moving from `localhost:5173` to the CloudFront domain required adding the new origin, and adding sign-in required allowing the `authorization` header.
+- **Check what was committed, not what is on disk.** A change that is saved locally but missing from the commit never reaches the pipeline. `git show HEAD:<file>` shows exactly what was pushed.
+- **A Git repository belongs at the project level.** Running `git init` in a parent folder created a repository around two separate projects, and `git rev-parse --show-toplevel` showed where the repository really started.
+- **A login screen is not security on its own.** The authorizer on the API is what rejects requests without a valid token.
+- **Accessible dropdowns need a replaced arrow, not a hidden one.** A native `<select>` keeps its keyboard behavior when only the arrow is restyled.
 
 ## Author
 
-BioDun, frontend developer.
+Arogundade Hammed A., frontend developer.
 
 - GitHub: [KaTaBioDun](https://github.com/KaTaBioDun)
 - LinkedIn: [hammed-arogundade](https://www.linkedin.com/in/hammed-arogundade-62b350255/)
